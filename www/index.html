@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LAN File Share</title>
+<style>
+  :root{
+    --bg:#0f172a; --panel:#1e293b; --panel2:#273449; --line:#334155;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --danger:#f87171;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.45 system-ui,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
+  header{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  header .sub{color:var(--muted);font-size:13px}
+  main{max-width:1000px;margin:0 auto;padding:20px}
+  .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer;font-size:14px}
+  button:hover{border-color:var(--accent)}
+  button:disabled{opacity:.45;cursor:default}
+  input[type=text]{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:14px;min-width:180px}
+  input[type=text]:focus{outline:none;border-color:var(--accent)}
+  .mkform{display:flex;gap:6px;align-items:center}
+  .crumbs{color:var(--muted);font-size:14px;margin-left:4px;word-break:break-all}
+  .crumbs a{color:var(--accent);cursor:pointer;text-decoration:none}
+  #drop{border:2px dashed var(--line);border-radius:12px;padding:22px;text-align:center;color:var(--muted);margin-bottom:16px;transition:.15s}
+  #drop.over{border-color:var(--accent);background:rgba(56,189,248,.08);color:var(--text)}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:12px;overflow:hidden}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);font-size:14px}
+  th{color:var(--muted);font-weight:600;background:var(--panel2)}
+  tr:last-child td{border-bottom:none}
+  td.name a{color:var(--text);text-decoration:none}
+  td.name a:hover{color:var(--accent)}
+  td.size,td.date{color:var(--muted);white-space:nowrap}
+  .icon{margin-right:8px}
+  .del{color:var(--danger);background:transparent;border:none;cursor:pointer;font-size:13px}
+  .del:hover{border-color:transparent;text-decoration:underline}
+  #status{color:var(--muted);font-size:13px;margin-left:auto}
+  .empty{color:var(--muted);padding:22px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>LAN File Share</h1>
+  <span class="sub">Same Wi-Fi only &middot; protected by password</span>
+</header>
+<main>
+  <div class="toolbar">
+    <button id="up">Up</button>
+    <button id="newfolder">New folder</button>
+    <form id="mkform" class="mkform" hidden>
+      <input id="mkname" type="text" placeholder="Folder name" autocomplete="off" />
+      <button type="submit">Create</button>
+      <button type="button" id="mkcancel">Cancel</button>
+    </form>
+    <button id="pick">Upload files</button>
+    <input id="file" type="file" multiple hidden />
+    <span class="crumbs" id="crumbs"></span>
+    <span id="status"></span>
+  </div>
+
+  <div id="drop">Drag &amp; drop files here to upload, or use the buttons above.</div>
+
+  <table>
+    <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</main>
+
+<script>
+const BASE = '/files';
+let segs = [];   // current directory, as raw path segments
+
+const $ = id => document.getElementById(id);
+const enc = s => encodeURIComponent(s);
+
+function dirUrl(){
+  return BASE + '/' + segs.map(enc).join('/') + (segs.length ? '/' : '');
+}
+function itemUrl(name){
+  return BASE + '/' + segs.map(enc).concat(enc(name)).join('/');
+}
+function setStatus(msg){ $('status').textContent = msg || ''; }
+
+function renderCrumbs(){
+  const c = $('crumbs');
+  c.innerHTML = '';
+  const root = document.createElement('a');
+  root.textContent = 'files';
+  root.onclick = () => { segs = []; load(); };
+  c.appendChild(root);
+  segs.forEach((s, i) => {
+    c.appendChild(document.createTextNode(' / '));
+    const a = document.createElement('a');
+    a.textContent = s;
+    a.onclick = () => { segs = segs.slice(0, i + 1); load(); };
+    c.appendChild(a);
+  });
+}
+
+function fmtSize(n){
+  if (n == null || n === '') return '';
+  const u = ['B','KB','MB','GB','TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1){ n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+}
+function fmtDate(s){
+  const d = new Date(s);
+  return isNaN(d) ? '' : d.toLocaleString();
+}
+
+async function load(){
+  renderCrumbs();
+  setStatus('Loading\u2026');
+  $('up').disabled = segs.length === 0;
+  try {
+    const res = await fetch(dirUrl(), { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const items = await res.json();
+    items.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    render(items);
+    setStatus(items.length + ' item' + (items.length === 1 ? '' : 's'));
+  } catch (e) {
+    setStatus('Could not load folder (' + e.message + ')');
+    $('rows').innerHTML = '';
+  }
+}
+
+function render(items){
+  const tb = $('rows');
+  tb.innerHTML = '';
+  if (!items.length){
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4; td.className = 'empty'; td.textContent = 'This folder is empty.';
+    tr.appendChild(td); tb.appendChild(tr); return;
+  }
+  for (const it of items){
+    const isDir = it.type === 'directory';
+    const tr = document.createElement('tr');
+
+    const nameTd = document.createElement('td');
+    nameTd.className = 'name';
+    const a = document.createElement('a');
+    a.innerHTML = '<span class="icon">' + (isDir ? '\uD83D\uDCC1' : '\uD83D\uDCC4') + '</span>' + it.name;
+    if (isDir){
+      a.href = 'javascript:void(0)';
+      a.title = 'Open folder';
+      a.onclick = () => { segs = segs.concat(it.name); load(); };
+    } else {
+      a.href = itemUrl(it.name);
+      a.setAttribute('download', it.name);
+    }
+    nameTd.appendChild(a);
+
+    const sizeTd = document.createElement('td');
+    sizeTd.className = 'size'; sizeTd.textContent = isDir ? '' : fmtSize(it.size);
+
+    const dateTd = document.createElement('td');
+    dateTd.className = 'date'; dateTd.textContent = fmtDate(it.mtime);
+
+    const actTd = document.createElement('td');
+    const del = document.createElement('button');
+    del.className = 'del';
+    del.textContent = isDir ? 'Delete folder' : 'Delete';
+    del.onclick = () => remove(it.name, isDir);
+    actTd.appendChild(del);
+
+    tr.append(nameTd, sizeTd, dateTd, actTd);
+    tb.appendChild(tr);
+  }
+}
+
+// Delete a file, or a folder and everything inside it.
+async function remove(name, isDir){
+  const msg = isDir
+    ? 'Delete folder "' + name + '" and ALL its contents?'
+    : 'Delete "' + name + '" ?';
+  if (!confirm(msg)) return;
+  setStatus('Deleting\u2026');
+  try {
+    await deletePath(itemUrl(name), isDir);
+    load();
+  } catch (e){
+    setStatus('Delete failed: ' + e.message);
+  }
+}
+
+async function deletePath(url, isDir){
+  if (isDir){
+    // Empty the folder first - nginx refuses to delete a non-empty folder.
+    const res = await fetch(url + '/', { headers: { 'Accept': 'application/json' } });
+    if (res.ok){
+      const kids = await res.json();
+      for (const k of kids){
+        await deletePath(url + '/' + enc(k.name), k.type === 'directory');
+      }
+    }
+  }
+  const r = await fetch(url, { method: 'DELETE' });
+  if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
+}
+
+async function createFolder(name){
+  name = (name || '').trim();
+  if (!name){ setStatus('Type a folder name first'); return; }
+  if (name.includes('/') || name.includes('\\')){ setStatus('Folder name cannot contain / or \\'); return; }
+  setStatus('Creating folder\u2026');
+  const res = await fetch(itemUrl(name), { method: 'MKCOL' });
+  if (res.ok || res.status === 201){
+    closeMkForm();
+    load();
+  } else if (res.status === 405){
+    setStatus('A file or folder with that name already exists');
+  } else {
+    setStatus('Could not create folder: HTTP ' + res.status);
+  }
+}
+
+function closeMkForm(){
+  $('mkform').hidden = true;
+  $('mkname').value = '';
+}
+
+async function uploadFiles(files){
+  if (!files || !files.length) return;
+  let done = 0;
+  for (const f of files){
+    setStatus('Uploading ' + f.name + ' (' + (done + 1) + '/' + files.length + ')\u2026');
+    try {
+      const res = await fetch(itemUrl(f.name), { method: 'PUT', body: f });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      done++;
+    } catch (e){
+      setStatus('Upload of ' + f.name + ' failed: ' + e.message);
+    }
+  }
+  setStatus('Uploaded ' + done + '/' + files.length);
+  load();
+}
+
+$('up').onclick = () => { segs = segs.slice(0, -1); load(); };
+$('pick').onclick = () => $('file').click();
+$('file').onchange = e => { uploadFiles(e.target.files); e.target.value = ''; };
+
+$('newfolder').onclick = () => { $('mkform').hidden = false; $('mkname').focus(); };
+$('mkcancel').onclick = closeMkForm;
+$('mkform').onsubmit = e => { e.preventDefault(); createFolder($('mkname').value); };
+
+const drop = $('drop');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('over');
+  uploadFiles(e.dataTransfer.files);
+});
+
+load();
+</script>
+</body>
+</html>
