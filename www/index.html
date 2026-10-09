@@ -34,8 +34,11 @@
   td.name a:hover{color:var(--accent)}
   td.size,td.date{color:var(--muted);white-space:nowrap}
   .icon{margin-right:8px}
-  .del{color:var(--danger);background:transparent;border:none;cursor:pointer;font-size:13px}
-  .del:hover{border-color:transparent;text-decoration:underline}
+  .act{white-space:nowrap}
+  .act button{background:transparent;border:none;cursor:pointer;font-size:13px;padding:2px 6px}
+  .act button:hover{text-decoration:underline}
+  .ren{color:var(--accent)}
+  .del{color:var(--danger)}
   #status{color:var(--muted);font-size:13px;margin-left:auto}
   .empty{color:var(--muted);padding:22px;text-align:center}
 </style>
@@ -74,6 +77,7 @@ let segs = [];   // current directory, as raw path segments
 
 const $ = id => document.getElementById(id);
 const enc = s => encodeURIComponent(s);
+const bad = s => s.includes('/') || s.includes('\\');
 
 function dirUrl(){
   return BASE + '/' + segs.map(enc).join('/') + (segs.length ? '/' : '');
@@ -164,18 +168,45 @@ function render(items){
     dateTd.className = 'date'; dateTd.textContent = fmtDate(it.mtime);
 
     const actTd = document.createElement('td');
+    actTd.className = 'act';
+    const ren = document.createElement('button');
+    ren.className = 'ren'; ren.textContent = 'Rename';
+    ren.onclick = () => renameItem(it.name);
     const del = document.createElement('button');
-    del.className = 'del';
-    del.textContent = isDir ? 'Delete folder' : 'Delete';
+    del.className = 'del'; del.textContent = 'Delete';
     del.onclick = () => remove(it.name, isDir);
-    actTd.appendChild(del);
+    actTd.append(ren, del);
 
     tr.append(nameTd, sizeTd, dateTd, actTd);
     tb.appendChild(tr);
   }
 }
 
-// Delete a file, or a folder and everything inside it.
+// ---- rename (WebDAV MOVE) ----
+async function renameItem(name){
+  const nn = prompt('Rename "' + name + '" to:', name);
+  if (nn === null) return;
+  const to = nn.trim();
+  if (!to || to === name) return;
+  if (bad(to)){ setStatus('Name cannot contain / or \\'); return; }
+  setStatus('Renaming\u2026');
+  try {
+    const res = await fetch(itemUrl(name), {
+      method: 'MOVE',
+      headers: {
+        'Destination': new URL(itemUrl(to), location.origin).href,
+        'Overwrite': 'F'
+      }
+    });
+    if (res.ok || res.status === 201 || res.status === 204) load();
+    else if (res.status === 412) setStatus('A file or folder with that name already exists');
+    else setStatus('Rename failed: HTTP ' + res.status);
+  } catch (e){
+    setStatus('Rename failed: ' + e.message);
+  }
+}
+
+// ---- delete (recursive for folders) ----
 async function remove(name, isDir){
   const msg = isDir
     ? 'Delete folder "' + name + '" and ALL its contents?'
@@ -189,10 +220,8 @@ async function remove(name, isDir){
     setStatus('Delete failed: ' + e.message);
   }
 }
-
 async function deletePath(url, isDir){
   if (isDir){
-    // Empty the folder first - nginx refuses to delete a non-empty folder.
     const res = await fetch(url + '/', { headers: { 'Accept': 'application/json' } });
     if (res.ok){
       const kids = await res.json();
@@ -205,27 +234,23 @@ async function deletePath(url, isDir){
   if (!r.ok && r.status !== 204) throw new Error('HTTP ' + r.status);
 }
 
+// ---- new folder (WebDAV MKCOL) ----
 async function createFolder(name){
   name = (name || '').trim();
   if (!name){ setStatus('Type a folder name first'); return; }
-  if (name.includes('/') || name.includes('\\')){ setStatus('Folder name cannot contain / or \\'); return; }
+  if (bad(name)){ setStatus('Folder name cannot contain / or \\'); return; }
   setStatus('Creating folder\u2026');
   const res = await fetch(itemUrl(name), { method: 'MKCOL' });
-  if (res.ok || res.status === 201){
-    closeMkForm();
-    load();
-  } else if (res.status === 405){
-    setStatus('A file or folder with that name already exists');
-  } else {
-    setStatus('Could not create folder: HTTP ' + res.status);
-  }
+  if (res.ok || res.status === 201){ closeMkForm(); load(); }
+  else if (res.status === 405) setStatus('A file or folder with that name already exists');
+  else setStatus('Could not create folder: HTTP ' + res.status);
 }
-
 function closeMkForm(){
   $('mkform').hidden = true;
   $('mkname').value = '';
 }
 
+// ---- upload (WebDAV PUT) ----
 async function uploadFiles(files){
   if (!files || !files.length) return;
   let done = 0;
@@ -246,7 +271,6 @@ async function uploadFiles(files){
 $('up').onclick = () => { segs = segs.slice(0, -1); load(); };
 $('pick').onclick = () => $('file').click();
 $('file').onchange = e => { uploadFiles(e.target.files); e.target.value = ''; };
-
 $('newfolder').onclick = () => { $('mkform').hidden = false; $('mkname').focus(); };
 $('mkcancel').onclick = closeMkForm;
 $('mkform').onsubmit = e => { e.preventDefault(); createFolder($('mkname').value); };
